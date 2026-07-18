@@ -463,55 +463,81 @@
   document.getElementById("closeAdmin").addEventListener("click", () => overlay.classList.remove("open"));
   overlay.addEventListener("click", (e) => { if(e.target === overlay) overlay.classList.remove("open"); });
 
-  function isLoggedIn(){ return sessionStorage.getItem("csi_admin_session") === "1"; }
+  function isLoggedIn(){ return !!sessionStorage.getItem("csi_admin_token"); }
+  function getAdminToken(){ return sessionStorage.getItem("csi_admin_token"); }
 
   /* ---- login ---- */
-  document.getElementById("doLogin").addEventListener("click", async () => {
+ document.getElementById("doLogin").addEventListener("click", async () => {
     const u = document.getElementById("loginUser").value.trim();
     const p = document.getElementById("loginPass").value;
-    const creds = getCreds();
-    const hash = await sha256(p);
     const msg = document.getElementById("loginMsg");
-    if(u === creds.username && hash === creds.hash){
-      sessionStorage.setItem("csi_admin_session","1");
-      msg.textContent=""; showView("view-dash"); renderAdminList(); renderGalleryAdminList(); renderHeroBgAdmin(); populateMotionForm();
-    } else {
-      msg.textContent = "Incorrect username or password."; msg.className="msg err";
+    msg.className = "msg"; msg.textContent = "Signing in…";
+    try {
+      const res = await fetch(`${API_BASE}/api/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: u, password: p })
+      });
+      const data = await res.json();
+      if(!res.ok){ msg.className="msg err"; msg.textContent = data.error || "Login failed."; return; }
+      sessionStorage.setItem("csi_admin_token", data.token);
+      msg.textContent = data.mustChangePassword
+        ? "Logged in — please change the default password below."
+        : "";
+      msg.className = data.mustChangePassword ? "msg ok" : "msg";
+      showView("view-dash"); renderAdminList(); renderGalleryAdminList(); renderHeroBgAdmin(); populateMotionForm();
+    } catch(e){
+      msg.className="msg err"; msg.textContent = "Couldn't reach the server. Try again in a moment.";
     }
   });
 
-  /* ---- forgot password: demo OTP ---- */
-  let currentOtp = null;
+ /* ---- forgot password: real OTP via backend ---- */
   document.getElementById("toForgot").addEventListener("click", () => showView("view-forgot"));
   document.getElementById("backToLogin1").addEventListener("click", () => showView("view-login"));
   document.getElementById("backToLogin2").addEventListener("click", () => showView("view-login"));
 
-  function issueDemoOtp(channelLabel){
-    currentOtp = String(Math.floor(100000 + Math.random()*900000));
+  async function requestOtp(method, channelLabel){
     const msg = document.getElementById("forgotMsg");
-    msg.className = "msg ok";
-    msg.innerHTML = `Demo OTP for ${channelLabel}: <b>${currentOtp}</b> (shown here since no live backend is connected yet)`;
-    showView("view-reset");
+    msg.className = "msg"; msg.textContent = "Sending…";
+    try {
+      const res = await fetch(`${API_BASE}/api/send-otp`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ method })
+      });
+      const data = await res.json();
+      if(!res.ok){ msg.className="msg err"; msg.textContent = data.error || "Couldn't send OTP."; return; }
+      msg.className = "msg ok"; msg.textContent = `Code sent via ${channelLabel}. Check and enter it below.`;
+      showView("view-reset");
+    } catch(e){
+      msg.className="msg err"; msg.textContent = "Couldn't reach the server. Try again in a moment.";
+    }
   }
-  document.getElementById("sendOtpSms").addEventListener("click", () => issueDemoOtp(`SMS to +91 ${ADMIN_PHONE}`));
-  document.getElementById("sendOtpEmail").addEventListener("click", () => issueDemoOtp(`email to ${ADMIN_EMAIL}`));
+  document.getElementById("sendOtpSms").addEventListener("click", () => requestOtp("sms", `SMS to +91 ${ADMIN_PHONE}`));
+  document.getElementById("sendOtpEmail").addEventListener("click", () => requestOtp("email", `email to ${ADMIN_EMAIL}`));
 
   document.getElementById("doReset").addEventListener("click", async () => {
     const otp = document.getElementById("otpInput").value.trim();
     const p1 = document.getElementById("newPass1").value;
     const p2 = document.getElementById("newPass2").value;
     const msg = document.getElementById("resetMsg");
-    if(otp !== currentOtp){ msg.className="msg err"; msg.textContent="Incorrect OTP."; return; }
-    if(p1.length < 6){ msg.className="msg err"; msg.textContent="Password should be at least 6 characters."; return; }
+    if(p1.length < 8){ msg.className="msg err"; msg.textContent="Password should be at least 8 characters."; return; }
     if(p1 !== p2){ msg.className="msg err"; msg.textContent="Passwords do not match."; return; }
-    const creds = getCreds();
-    creds.hash = await sha256(p1);
-    localStorage.setItem(LS_CREDS, JSON.stringify(creds));
-    msg.className="msg ok"; msg.textContent="Password reset. You can log in now.";
-    currentOtp = null;
-    setTimeout(() => showView("view-login"), 900);
+    msg.className = "msg"; msg.textContent = "Resetting…";
+    try {
+      const res = await fetch(`${API_BASE}/api/reset-password`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ otp, newPassword: p1 })
+      });
+      const data = await res.json();
+      if(!res.ok){ msg.className="msg err"; msg.textContent = data.error || "Reset failed."; return; }
+      msg.className="msg ok"; msg.textContent="Password reset. You can log in now.";
+      setTimeout(() => showView("view-login"), 900);
+    } catch(e){
+      msg.className="msg err"; msg.textContent = "Couldn't reach the server. Try again in a moment.";
+    }
   });
-
   /* ---- dashboard: add event ---- */
   document.getElementById("addEvent").addEventListener("click", async () => {
     const day = document.getElementById("evDay").value.trim() || "—";
@@ -535,17 +561,26 @@
     const p1 = document.getElementById("chgPass1").value;
     const p2 = document.getElementById("chgPass2").value;
     const msg = document.getElementById("chgMsg");
-    const creds = getCreds();
-    const curHash = await sha256(cur);
-    if(curHash !== creds.hash){ msg.className="msg err"; msg.textContent="Current password is incorrect."; return; }
-    if(p1.length < 6){ msg.className="msg err"; msg.textContent="New password should be at least 6 characters."; return; }
+    if(p1.length < 8){ msg.className="msg err"; msg.textContent="New password should be at least 8 characters."; return; }
     if(p1 !== p2){ msg.className="msg err"; msg.textContent="New passwords do not match."; return; }
-    creds.hash = await sha256(p1);
-    localStorage.setItem(LS_CREDS, JSON.stringify(creds));
-    ["curPass","chgPass1","chgPass2"].forEach(id => document.getElementById(id).value = "");
-    msg.className="msg ok"; msg.textContent="Password updated.";
+    msg.className = "msg"; msg.textContent = "Updating…";
+    try {
+      const res = await fetch(`${API_BASE}/api/change-password`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${getAdminToken()}`
+        },
+        body: JSON.stringify({ currentPassword: cur, newPassword: p1 })
+      });
+      const data = await res.json();
+      if(!res.ok){ msg.className="msg err"; msg.textContent = data.error || "Update failed."; return; }
+      ["curPass","chgPass1","chgPass2"].forEach(id => document.getElementById(id).value = "");
+      msg.className="msg ok"; msg.textContent="Password updated.";
+    } catch(e){
+      msg.className="msg err"; msg.textContent = "Couldn't reach the server. Try again in a moment.";
+    }
   });
-
   /* ---- motion settings form ---- */
   const MOTION_KEYS = ["fairylights","doves","blobdrift","kolam","ticker","kinetic","heroparallax","scrollbar","calm"];
   function populateMotionForm(){
@@ -561,8 +596,8 @@
     msg.className = "msg ok"; msg.textContent = "Motion settings saved for this browser.";
   });
 
-  document.getElementById("doLogout").addEventListener("click", () => {
-    sessionStorage.removeItem("csi_admin_session");
+ document.getElementById("doLogout").addEventListener("click", () => {
+    sessionStorage.removeItem("csi_admin_token");
     overlay.classList.remove("open");
   });
 
