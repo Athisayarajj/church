@@ -1,4 +1,4 @@
-document.getElementById('year').textContent = new Date().getFullYear();
+  document.getElementById('year').textContent = new Date().getFullYear();
 
   /* ---- mobile nav ---- */
   const toggle = document.getElementById('menuToggle');
@@ -401,4 +401,173 @@ document.getElementById('year').textContent = new Date().getFullYear();
     const curEl = document.getElementById("heroBgCurrent");
     if(curEl) curEl.textContent = cur
       ? `Current: a custom ${cur.type === "video" ? "video" : "photo"} background is active on the home page.`
-      : "Curr
+      : "Current: default background video (hero-video.mp4).";
+    const typeSel = document.getElementById("heroBgType");
+    if(typeSel) typeSel.value = cur ? cur.type : "image";
+    const note = document.getElementById("heroBgSupabaseNote");
+    if(note) note.innerHTML = supabaseClient
+      ? ""
+      : `<p class="admin-note">Supabase isn't connected yet, so this saves in this browser only — a video file will likely be too large for local storage and won't be visible to other visitors either way. Connect Supabase (see the Gallery Photos note above) to make hero backgrounds real and permanent for everyone.</p>`;
+  }
+
+  document.getElementById("uploadHeroBg").addEventListener("click", async () => {
+    const fileInput = document.getElementById("heroBgFile");
+    const type = document.getElementById("heroBgType").value;
+    const msg = document.getElementById("heroBgMsg");
+    const file = fileInput.files[0];
+    if(!file){ msg.className="msg err"; msg.textContent="Choose a photo or video file first."; return; }
+
+    if(supabaseClient){
+      const path = `hero/${Date.now()}-${file.name}`;
+      const { error } = await supabaseClient.storage.from(SUPABASE_BUCKET).upload(path, file);
+      if(error){ msg.className="msg err"; msg.textContent="Upload failed: " + error.message; return; }
+      const { data } = supabaseClient.storage.from(SUPABASE_BUCKET).getPublicUrl(path);
+      const old = getHeroBg();
+      if(old && old.path) await supabaseClient.storage.from(SUPABASE_BUCKET).remove([old.path]);
+      const { error: dbError } = await saveHeroBgSetting({ type, url: data.publicUrl, path });
+      if(dbError){ msg.className="msg err"; msg.textContent="File uploaded but saving the setting failed: " + dbError.message; return; }
+      msg.className="msg ok"; msg.textContent="Hero background updated for all visitors.";
+      fileInput.value = "";
+      renderHeroBg(); renderHeroBgAdmin();
+    } else {
+      const reader = new FileReader();
+      reader.onload = async () => {
+        try {
+          await saveHeroBgSetting({ type, url: reader.result });
+          msg.className="msg ok"; msg.textContent="Previewed locally in this browser only (connect Supabase to make this permanent and visible to other visitors).";
+        } catch(e){
+          msg.className="msg err"; msg.textContent="That file is too large to store locally in this browser. Connect Supabase to upload it for real.";
+        }
+        fileInput.value = "";
+        renderHeroBg(); renderHeroBgAdmin();
+      };
+      reader.onerror = () => { msg.className="msg err"; msg.textContent="Couldn't read that file."; };
+      reader.readAsDataURL(file);
+    }
+  });
+
+  document.getElementById("resetHeroBg").addEventListener("click", async () => {
+    const old = getHeroBg();
+    if(supabaseClient && old && old.path){ await supabaseClient.storage.from(SUPABASE_BUCKET).remove([old.path]); }
+    await clearHeroBgSetting();
+    renderHeroBg(); renderHeroBgAdmin();
+    const msg = document.getElementById("heroBgMsg");
+    msg.className="msg ok"; msg.textContent="Reset to the default video.";
+  });
+
+  /* ---- modal open/close ---- */
+  const overlay = document.getElementById("adminOverlay");
+  function showView(id){ document.querySelectorAll(".admin-view").forEach(v => v.classList.remove("active")); document.getElementById(id).classList.add("active"); }
+  document.querySelectorAll(".admin-trigger").forEach(btn => btn.addEventListener("click", () => { overlay.classList.add("open"); showView(isLoggedIn() ? "view-dash" : "view-login"); if(isLoggedIn()){ renderAdminList(); renderGalleryAdminList(); renderHeroBgAdmin(); populateMotionForm(); } }));
+  document.getElementById("closeAdmin").addEventListener("click", () => overlay.classList.remove("open"));
+  overlay.addEventListener("click", (e) => { if(e.target === overlay) overlay.classList.remove("open"); });
+
+  function isLoggedIn(){ return sessionStorage.getItem("csi_admin_session") === "1"; }
+
+  /* ---- login ---- */
+  document.getElementById("doLogin").addEventListener("click", async () => {
+    const u = document.getElementById("loginUser").value.trim();
+    const p = document.getElementById("loginPass").value;
+    const creds = getCreds();
+    const hash = await sha256(p);
+    const msg = document.getElementById("loginMsg");
+    if(u === creds.username && hash === creds.hash){
+      sessionStorage.setItem("csi_admin_session","1");
+      msg.textContent=""; showView("view-dash"); renderAdminList(); renderGalleryAdminList(); renderHeroBgAdmin(); populateMotionForm();
+    } else {
+      msg.textContent = "Incorrect username or password."; msg.className="msg err";
+    }
+  });
+
+  /* ---- forgot password: demo OTP ---- */
+  let currentOtp = null;
+  document.getElementById("toForgot").addEventListener("click", () => showView("view-forgot"));
+  document.getElementById("backToLogin1").addEventListener("click", () => showView("view-login"));
+  document.getElementById("backToLogin2").addEventListener("click", () => showView("view-login"));
+
+  function issueDemoOtp(channelLabel){
+    currentOtp = String(Math.floor(100000 + Math.random()*900000));
+    const msg = document.getElementById("forgotMsg");
+    msg.className = "msg ok";
+    msg.innerHTML = `Demo OTP for ${channelLabel}: <b>${currentOtp}</b> (shown here since no live backend is connected yet)`;
+    showView("view-reset");
+  }
+  document.getElementById("sendOtpSms").addEventListener("click", () => issueDemoOtp(`SMS to +91 ${ADMIN_PHONE}`));
+  document.getElementById("sendOtpEmail").addEventListener("click", () => issueDemoOtp(`email to ${ADMIN_EMAIL}`));
+
+  document.getElementById("doReset").addEventListener("click", async () => {
+    const otp = document.getElementById("otpInput").value.trim();
+    const p1 = document.getElementById("newPass1").value;
+    const p2 = document.getElementById("newPass2").value;
+    const msg = document.getElementById("resetMsg");
+    if(otp !== currentOtp){ msg.className="msg err"; msg.textContent="Incorrect OTP."; return; }
+    if(p1.length < 6){ msg.className="msg err"; msg.textContent="Password should be at least 6 characters."; return; }
+    if(p1 !== p2){ msg.className="msg err"; msg.textContent="Passwords do not match."; return; }
+    const creds = getCreds();
+    creds.hash = await sha256(p1);
+    localStorage.setItem(LS_CREDS, JSON.stringify(creds));
+    msg.className="msg ok"; msg.textContent="Password reset. You can log in now.";
+    currentOtp = null;
+    setTimeout(() => showView("view-login"), 900);
+  });
+
+  /* ---- dashboard: add event ---- */
+  document.getElementById("addEvent").addEventListener("click", async () => {
+    const day = document.getElementById("evDay").value.trim() || "—";
+    const month = document.getElementById("evMonth").value.trim().toUpperCase() || "TBD";
+    const title = document.getElementById("evTitle").value.trim();
+    const desc = document.getElementById("evDesc").value.trim();
+    const tag = document.getElementById("evTag").value;
+    const msg = document.getElementById("dashMsg");
+    if(!title){ msg.className="msg err"; msg.textContent="Please add a title."; return; }
+    const { error } = await addEventRemote({ day, month, title, desc, tag });
+    if(error){ msg.className="msg err"; msg.textContent="Couldn't add event: " + error.message; return; }
+    await refreshEvents();
+    ["evDay","evMonth","evTitle","evDesc"].forEach(id => document.getElementById(id).value = "");
+    msg.className="msg ok"; msg.textContent="Event added — visible to everyone.";
+    renderAdminList(); renderEvents(); buildTicker();
+  });
+
+  /* ---- dashboard: change password ---- */
+  document.getElementById("changePass").addEventListener("click", async () => {
+    const cur = document.getElementById("curPass").value;
+    const p1 = document.getElementById("chgPass1").value;
+    const p2 = document.getElementById("chgPass2").value;
+    const msg = document.getElementById("chgMsg");
+    const creds = getCreds();
+    const curHash = await sha256(cur);
+    if(curHash !== creds.hash){ msg.className="msg err"; msg.textContent="Current password is incorrect."; return; }
+    if(p1.length < 6){ msg.className="msg err"; msg.textContent="New password should be at least 6 characters."; return; }
+    if(p1 !== p2){ msg.className="msg err"; msg.textContent="New passwords do not match."; return; }
+    creds.hash = await sha256(p1);
+    localStorage.setItem(LS_CREDS, JSON.stringify(creds));
+    ["curPass","chgPass1","chgPass2"].forEach(id => document.getElementById(id).value = "");
+    msg.className="msg ok"; msg.textContent="Password updated.";
+  });
+
+  /* ---- motion settings form ---- */
+  const MOTION_KEYS = ["fairylights","doves","blobdrift","kolam","ticker","kinetic","heroparallax","scrollbar","calm"];
+  function populateMotionForm(){
+    const s = getMotionSettings();
+    MOTION_KEYS.forEach(k => { const el = document.getElementById("mo-" + k); if(el) el.checked = !!s[k]; });
+  }
+  document.getElementById("saveMotion").addEventListener("click", () => {
+    const s = {};
+    MOTION_KEYS.forEach(k => { s[k] = document.getElementById("mo-" + k).checked; });
+    localStorage.setItem(LS_MOTION, JSON.stringify(s));
+    applyMotionSettings();
+    const msg = document.getElementById("motionMsg");
+    msg.className = "msg ok"; msg.textContent = "Motion settings saved for this browser.";
+  });
+
+  document.getElementById("doLogout").addEventListener("click", () => {
+    sessionStorage.removeItem("csi_admin_session");
+    overlay.classList.remove("open");
+  });
+
+  ensureSeed().then(async () => {
+    await Promise.all([refreshEvents(), refreshGallery(), refreshHeroBg()]);
+    renderEvents(); buildTicker();
+    renderGalleryOnSite();
+    renderHeroBg();
+  });
