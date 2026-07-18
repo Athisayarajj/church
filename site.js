@@ -1,5 +1,4 @@
-
-  document.getElementById('year').textContent = new Date().getFullYear();
+document.getElementById('year').textContent = new Date().getFullYear();
 
   /* ---- mobile nav ---- */
   const toggle = document.getElementById('menuToggle');
@@ -172,19 +171,39 @@
       const hash = await sha256("admin123");
       localStorage.setItem(LS_CREDS, JSON.stringify({ username:"admin", hash }));
     }
-    if(!localStorage.getItem(LS_EVENTS)){
-      const seed = [
-        { day:"01", month:"MAY", title:"Vacation Bible School Begins", desc:"A week of Bible teaching, songs and activities for children of the parish begins today.", tag:"Confirmed" },
-        { day:"25", month:"DEC", title:"Christmas Service", desc:"3:30 AM &middot; a candlelight service before dawn &mdash; the whole parish gathers to welcome Christmas.", tag:"Confirmed" },
-        { day:"—", month:"3RD FRI", title:"Monthly Night Prayer", desc:"7:00 &ndash; 10:00 PM &middot; the parish keeps watch together in prayer.", tag:"Recurring" }
-      ];
-      localStorage.setItem(LS_EVENTS, JSON.stringify(seed));
-    }
+    // events are now seeded once via the setup.sql migration in Supabase,
+    // not seeded client-side, so every visitor shares the same data.
   }
 
-  function getEvents(){ return JSON.parse(localStorage.getItem(LS_EVENTS) || "[]"); }
-  function saveEvents(list){ localStorage.setItem(LS_EVENTS, JSON.stringify(list)); }
   function getCreds(){ return JSON.parse(localStorage.getItem(LS_CREDS) || "{}"); }
+
+  /* ---- events: now backed by the Supabase "events" table so all
+     visitors see the same list, not just the browser that added them.
+     eventsCache holds the last-fetched list; getEvents() reads the
+     cache synchronously (so existing render code doesn't need to
+     change), and refreshEvents() re-fetches from Supabase. ---- */
+  let eventsCache = [];
+  function getEvents(){ return eventsCache; }
+  async function refreshEvents(){
+    if(!supabaseClient){ eventsCache = JSON.parse(localStorage.getItem(LS_EVENTS) || "[]"); return; }
+    const { data, error } = await supabaseClient.from("events").select("*").order("created_at", { ascending: true });
+    if(error){ console.error("refreshEvents:", error); return; }
+    eventsCache = data.map(r => ({ id: r.id, day: r.day, month: r.month, title: r.title, desc: r.description, tag: r.tag }));
+  }
+  async function addEventRemote(ev){
+    if(!supabaseClient){
+      const list = JSON.parse(localStorage.getItem(LS_EVENTS) || "[]");
+      list.push(ev); localStorage.setItem(LS_EVENTS, JSON.stringify(list));
+      return { error: null };
+    }
+    const { error } = await supabaseClient.from("events").insert({ day: ev.day, month: ev.month, title: ev.title, description: ev.desc, tag: ev.tag });
+    return { error };
+  }
+  async function deleteEventRemote(id){
+    if(!supabaseClient) return { error: null };
+    const { error } = await supabaseClient.from("events").delete().eq("id", id);
+    return { error };
+  }
 
   function renderEvents(){
     const list = getEvents();
@@ -206,16 +225,44 @@
         <span><b>${ev.day} ${ev.month}</b> &mdash; ${ev.title}</span>
         <button class="icon-btn" data-i="${i}">Delete</button>
       </div>`).join("") || '<p class="sub">No events yet.</p>';
-    el.querySelectorAll(".icon-btn").forEach(btn => btn.addEventListener("click", () => {
-      const list = getEvents();
-      list.splice(Number(btn.dataset.i), 1);
-      saveEvents(list); renderAdminList(); renderEvents(); buildTicker();
+    el.querySelectorAll(".icon-btn").forEach(btn => btn.addEventListener("click", async () => {
+      const ev = getEvents()[Number(btn.dataset.i)];
+      const msg = document.getElementById("dashMsg");
+      if(ev && ev.id){
+        const { error } = await deleteEventRemote(ev.id);
+        if(error){ if(msg){ msg.className="msg err"; msg.textContent="Delete failed: " + error.message; } return; }
+      }
+      await refreshEvents();
+      renderAdminList(); renderEvents(); buildTicker();
     }));
   }
 
-  /* ---- gallery: uploaded photos (Supabase Storage) ---- */
-  function getGallery(){ return JSON.parse(localStorage.getItem(LS_GALLERY) || "[]"); }
-  function saveGallery(list){ localStorage.setItem(LS_GALLERY, JSON.stringify(list)); }
+  /* ---- gallery: uploaded photos. Files live in Supabase Storage;
+     the shared index of {url, path, caption} lives in the
+     gallery_photos table so every visitor's browser sees the same
+     photos, not just the one that uploaded them. ---- */
+  let galleryCache = [];
+  function getGallery(){ return galleryCache; }
+  async function refreshGallery(){
+    if(!supabaseClient){ galleryCache = JSON.parse(localStorage.getItem(LS_GALLERY) || "[]"); return; }
+    const { data, error } = await supabaseClient.from("gallery_photos").select("*").order("created_at", { ascending: true });
+    if(error){ console.error("refreshGallery:", error); return; }
+    galleryCache = data;
+  }
+  async function addGalleryPhotoRemote(photo){
+    if(!supabaseClient){
+      const list = JSON.parse(localStorage.getItem(LS_GALLERY) || "[]");
+      list.push(photo); localStorage.setItem(LS_GALLERY, JSON.stringify(list));
+      return { error: null };
+    }
+    const { error } = await supabaseClient.from("gallery_photos").insert({ url: photo.url, path: photo.path, caption: photo.caption });
+    return { error };
+  }
+  async function deleteGalleryPhotoRemote(id){
+    if(!supabaseClient) return { error: null };
+    const { error } = await supabaseClient.from("gallery_photos").delete().eq("id", id);
+    return { error };
+  }
 
   const PLACEHOLDER_IDS = ["ph-congregation","ph-sanctuary","ph-festival","ph-sunday"];
 
@@ -258,8 +305,8 @@
       if(supabaseClient && photo.path){
         await supabaseClient.storage.from(SUPABASE_BUCKET).remove([photo.path]);
       }
-      list.splice(Number(btn.dataset.gi), 1);
-      saveGallery(list); renderGalleryAdminList(); renderGalleryOnSite();
+      if(photo.id){ await deleteGalleryPhotoRemote(photo.id); }
+      await refreshGallery(); renderGalleryAdminList(); renderGalleryOnSite();
     }));
     const note = document.getElementById("gallerySupabaseNote");
     note.innerHTML = supabaseClient
@@ -279,17 +326,19 @@
       const { error } = await supabaseClient.storage.from(SUPABASE_BUCKET).upload(path, file);
       if(error){ msg.className="msg err"; msg.textContent="Upload failed: " + error.message; return; }
       const { data } = supabaseClient.storage.from(SUPABASE_BUCKET).getPublicUrl(path);
-      const list = getGallery();
-      list.push({ url: data.publicUrl, path, caption });
-      saveGallery(list);
-      msg.className="msg ok"; msg.textContent="Photo uploaded.";
+      const { error: dbError } = await addGalleryPhotoRemote({ url: data.publicUrl, path, caption });
+      if(dbError){
+        msg.className="msg err"; msg.textContent="File uploaded but saving the listing failed: " + dbError.message;
+        return;
+      }
+      await refreshGallery();
+      msg.className="msg ok"; msg.textContent="Photo uploaded — visible to everyone.";
     } else {
       // no Supabase configured — fall back to a local, browser-only preview via a data URL
       const reader = new FileReader();
-      reader.onload = () => {
-        const list = getGallery();
-        list.push({ url: reader.result, caption });
-        saveGallery(list);
+      reader.onload = async () => {
+        await addGalleryPhotoRemote({ url: reader.result, caption });
+        await refreshGallery();
         renderGalleryAdminList(); renderGalleryOnSite();
       };
       reader.readAsDataURL(file);
@@ -299,9 +348,29 @@
     renderGalleryAdminList(); renderGalleryOnSite();
   });
 
-  /* ---- hero background: photo or video (Supabase Storage, same bucket, "hero/" folder) ---- */
-  function getHeroBg(){ return JSON.parse(localStorage.getItem(LS_HEROBG) || "null"); }
-  function saveHeroBgSetting(v){ localStorage.setItem(LS_HEROBG, JSON.stringify(v)); }
+  /* ---- hero background: photo or video (Supabase Storage, same bucket,
+     "hero/" folder). The active setting is one shared row in the
+     hero_bg table so every visitor sees the same background. ---- */
+  let heroBgCache = null;
+  function getHeroBg(){ return heroBgCache; }
+  async function refreshHeroBg(){
+    if(!supabaseClient){ heroBgCache = JSON.parse(localStorage.getItem(LS_HEROBG) || "null"); return; }
+    const { data, error } = await supabaseClient.from("hero_bg").select("*").eq("id", 1).maybeSingle();
+    if(error){ console.error("refreshHeroBg:", error); return; }
+    heroBgCache = data && data.url ? { type: data.type, url: data.url, path: data.path } : null;
+  }
+  async function saveHeroBgSetting(v){
+    if(!supabaseClient){ localStorage.setItem(LS_HEROBG, JSON.stringify(v)); heroBgCache = v; return { error: null }; }
+    const { error } = await supabaseClient.from("hero_bg").upsert({ id: 1, type: v.type, url: v.url, path: v.path, updated_at: new Date().toISOString() });
+    if(!error) heroBgCache = v;
+    return { error };
+  }
+  async function clearHeroBgSetting(){
+    if(!supabaseClient){ localStorage.removeItem(LS_HEROBG); heroBgCache = null; return { error: null }; }
+    const { error } = await supabaseClient.from("hero_bg").delete().eq("id", 1);
+    if(!error) heroBgCache = null;
+    return { error };
+  }
 
   function renderHeroBg(){
     const img = document.getElementById("heroBgImg");
@@ -332,169 +401,4 @@
     const curEl = document.getElementById("heroBgCurrent");
     if(curEl) curEl.textContent = cur
       ? `Current: a custom ${cur.type === "video" ? "video" : "photo"} background is active on the home page.`
-      : "Current: default background video (hero-video.mp4).";
-    const typeSel = document.getElementById("heroBgType");
-    if(typeSel) typeSel.value = cur ? cur.type : "image";
-    const note = document.getElementById("heroBgSupabaseNote");
-    if(note) note.innerHTML = supabaseClient
-      ? ""
-      : `<p class="admin-note">Supabase isn't connected yet, so this saves in this browser only — a video file will likely be too large for local storage and won't be visible to other visitors either way. Connect Supabase (see the Gallery Photos note above) to make hero backgrounds real and permanent for everyone.</p>`;
-  }
-
-  document.getElementById("uploadHeroBg").addEventListener("click", async () => {
-    const fileInput = document.getElementById("heroBgFile");
-    const type = document.getElementById("heroBgType").value;
-    const msg = document.getElementById("heroBgMsg");
-    const file = fileInput.files[0];
-    if(!file){ msg.className="msg err"; msg.textContent="Choose a photo or video file first."; return; }
-
-    if(supabaseClient){
-      const path = `hero/${Date.now()}-${file.name}`;
-      const { error } = await supabaseClient.storage.from(SUPABASE_BUCKET).upload(path, file);
-      if(error){ msg.className="msg err"; msg.textContent="Upload failed: " + error.message; return; }
-      const { data } = supabaseClient.storage.from(SUPABASE_BUCKET).getPublicUrl(path);
-      const old = getHeroBg();
-      if(old && old.path) await supabaseClient.storage.from(SUPABASE_BUCKET).remove([old.path]);
-      saveHeroBgSetting({ type, url: data.publicUrl, path });
-      msg.className="msg ok"; msg.textContent="Hero background updated for all visitors.";
-      fileInput.value = "";
-      renderHeroBg(); renderHeroBgAdmin();
-    } else {
-      const reader = new FileReader();
-      reader.onload = () => {
-        try {
-          saveHeroBgSetting({ type, url: reader.result });
-          msg.className="msg ok"; msg.textContent="Previewed locally in this browser only (connect Supabase to make this permanent and visible to other visitors).";
-        } catch(e){
-          msg.className="msg err"; msg.textContent="That file is too large to store locally in this browser. Connect Supabase to upload it for real.";
-        }
-        fileInput.value = "";
-        renderHeroBg(); renderHeroBgAdmin();
-      };
-      reader.onerror = () => { msg.className="msg err"; msg.textContent="Couldn't read that file."; };
-      reader.readAsDataURL(file);
-    }
-  });
-
-  document.getElementById("resetHeroBg").addEventListener("click", async () => {
-    const old = getHeroBg();
-    if(supabaseClient && old && old.path){ await supabaseClient.storage.from(SUPABASE_BUCKET).remove([old.path]); }
-    localStorage.removeItem(LS_HEROBG);
-    renderHeroBg(); renderHeroBgAdmin();
-    const msg = document.getElementById("heroBgMsg");
-    msg.className="msg ok"; msg.textContent="Reset to the default video.";
-  });
-
-  /* ---- modal open/close ---- */
-  const overlay = document.getElementById("adminOverlay");
-  function showView(id){ document.querySelectorAll(".admin-view").forEach(v => v.classList.remove("active")); document.getElementById(id).classList.add("active"); }
-  document.querySelectorAll(".admin-trigger").forEach(btn => btn.addEventListener("click", () => { overlay.classList.add("open"); showView(isLoggedIn() ? "view-dash" : "view-login"); if(isLoggedIn()){ renderAdminList(); renderGalleryAdminList(); renderHeroBgAdmin(); populateMotionForm(); } }));
-  document.getElementById("closeAdmin").addEventListener("click", () => overlay.classList.remove("open"));
-  overlay.addEventListener("click", (e) => { if(e.target === overlay) overlay.classList.remove("open"); });
-
-  function isLoggedIn(){ return sessionStorage.getItem("csi_admin_session") === "1"; }
-
-  /* ---- login ---- */
-  document.getElementById("doLogin").addEventListener("click", async () => {
-    const u = document.getElementById("loginUser").value.trim();
-    const p = document.getElementById("loginPass").value;
-    const creds = getCreds();
-    const hash = await sha256(p);
-    const msg = document.getElementById("loginMsg");
-    if(u === creds.username && hash === creds.hash){
-      sessionStorage.setItem("csi_admin_session","1");
-      msg.textContent=""; showView("view-dash"); renderAdminList(); renderGalleryAdminList(); renderHeroBgAdmin(); populateMotionForm();
-    } else {
-      msg.textContent = "Incorrect username or password."; msg.className="msg err";
-    }
-  });
-
-  /* ---- forgot password: demo OTP ---- */
-  let currentOtp = null;
-  document.getElementById("toForgot").addEventListener("click", () => showView("view-forgot"));
-  document.getElementById("backToLogin1").addEventListener("click", () => showView("view-login"));
-  document.getElementById("backToLogin2").addEventListener("click", () => showView("view-login"));
-
-  function issueDemoOtp(channelLabel){
-    currentOtp = String(Math.floor(100000 + Math.random()*900000));
-    const msg = document.getElementById("forgotMsg");
-    msg.className = "msg ok";
-    msg.innerHTML = `Demo OTP for ${channelLabel}: <b>${currentOtp}</b> (shown here since no live backend is connected yet)`;
-    showView("view-reset");
-  }
-  document.getElementById("sendOtpSms").addEventListener("click", () => issueDemoOtp(`SMS to +91 ${ADMIN_PHONE}`));
-  document.getElementById("sendOtpEmail").addEventListener("click", () => issueDemoOtp(`email to ${ADMIN_EMAIL}`));
-
-  document.getElementById("doReset").addEventListener("click", async () => {
-    const otp = document.getElementById("otpInput").value.trim();
-    const p1 = document.getElementById("newPass1").value;
-    const p2 = document.getElementById("newPass2").value;
-    const msg = document.getElementById("resetMsg");
-    if(otp !== currentOtp){ msg.className="msg err"; msg.textContent="Incorrect OTP."; return; }
-    if(p1.length < 6){ msg.className="msg err"; msg.textContent="Password should be at least 6 characters."; return; }
-    if(p1 !== p2){ msg.className="msg err"; msg.textContent="Passwords do not match."; return; }
-    const creds = getCreds();
-    creds.hash = await sha256(p1);
-    localStorage.setItem(LS_CREDS, JSON.stringify(creds));
-    msg.className="msg ok"; msg.textContent="Password reset. You can log in now.";
-    currentOtp = null;
-    setTimeout(() => showView("view-login"), 900);
-  });
-
-  /* ---- dashboard: add event ---- */
-  document.getElementById("addEvent").addEventListener("click", () => {
-    const day = document.getElementById("evDay").value.trim() || "—";
-    const month = document.getElementById("evMonth").value.trim().toUpperCase() || "TBD";
-    const title = document.getElementById("evTitle").value.trim();
-    const desc = document.getElementById("evDesc").value.trim();
-    const tag = document.getElementById("evTag").value;
-    const msg = document.getElementById("dashMsg");
-    if(!title){ msg.className="msg err"; msg.textContent="Please add a title."; return; }
-    const list = getEvents();
-    list.push({ day, month, title, desc, tag });
-    saveEvents(list);
-    ["evDay","evMonth","evTitle","evDesc"].forEach(id => document.getElementById(id).value = "");
-    msg.className="msg ok"; msg.textContent="Event added.";
-    renderAdminList(); renderEvents(); buildTicker();
-  });
-
-  /* ---- dashboard: change password ---- */
-  document.getElementById("changePass").addEventListener("click", async () => {
-    const cur = document.getElementById("curPass").value;
-    const p1 = document.getElementById("chgPass1").value;
-    const p2 = document.getElementById("chgPass2").value;
-    const msg = document.getElementById("chgMsg");
-    const creds = getCreds();
-    const curHash = await sha256(cur);
-    if(curHash !== creds.hash){ msg.className="msg err"; msg.textContent="Current password is incorrect."; return; }
-    if(p1.length < 6){ msg.className="msg err"; msg.textContent="New password should be at least 6 characters."; return; }
-    if(p1 !== p2){ msg.className="msg err"; msg.textContent="New passwords do not match."; return; }
-    creds.hash = await sha256(p1);
-    localStorage.setItem(LS_CREDS, JSON.stringify(creds));
-    ["curPass","chgPass1","chgPass2"].forEach(id => document.getElementById(id).value = "");
-    msg.className="msg ok"; msg.textContent="Password updated.";
-  });
-
-  /* ---- motion settings form ---- */
-  const MOTION_KEYS = ["fairylights","doves","blobdrift","kolam","ticker","kinetic","heroparallax","scrollbar","calm"];
-  function populateMotionForm(){
-    const s = getMotionSettings();
-    MOTION_KEYS.forEach(k => { const el = document.getElementById("mo-" + k); if(el) el.checked = !!s[k]; });
-  }
-  document.getElementById("saveMotion").addEventListener("click", () => {
-    const s = {};
-    MOTION_KEYS.forEach(k => { s[k] = document.getElementById("mo-" + k).checked; });
-    localStorage.setItem(LS_MOTION, JSON.stringify(s));
-    applyMotionSettings();
-    const msg = document.getElementById("motionMsg");
-    msg.className = "msg ok"; msg.textContent = "Motion settings saved for this browser.";
-  });
-
-  document.getElementById("doLogout").addEventListener("click", () => {
-    sessionStorage.removeItem("csi_admin_session");
-    overlay.classList.remove("open");
-  });
-
-  ensureSeed().then(() => { renderEvents(); buildTicker(); });
-  renderGalleryOnSite();
-  renderHeroBg();
+      : "Curr
