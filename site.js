@@ -125,7 +125,8 @@
 
   const ADMIN_PHONE = "6374399323";
   const ADMIN_EMAIL = "christchurchanbinnagaram@gmail.com";
-  const LS_CREDS = "csi_admin_creds";
+  const API_BASE = "https://church-backend-30a6.onrender.com";
+  const LS_CREDS = "csi_admin_creds"; // no longer used for login, kept harmless for old data
   const LS_EVENTS = "csi_events";
   const LS_GALLERY = "csi_gallery";
   const LS_HEROBG = "csi_hero_bg";
