@@ -215,7 +215,6 @@
         <button class="btn-text" id="toForgot">Forgot password?</button>
       </div>
       <p class="msg err" id="loginMsg"></p>
-      <p class="admin-note">First time here? Default login is <b>admin</b> / <b>admin123</b> — please change the password immediately after logging in.</p>
     </div>
 
     <!-- FORGOT PASSWORD: request OTP -->
@@ -228,7 +227,7 @@
       </div>
       <div class="admin-actions"><button class="btn-text" id="backToLogin1">Back to login</button></div>
       <p class="msg" id="forgotMsg"></p>
-      <p class="admin-note">This demo site can't send a real SMS or email yet — a static page has nowhere secure to hold an SMS/email-provider API key. The OTP is shown right here so you can test the flow. For real delivery: SMS needs a backend using something like Fast2SMS, MSG91, or Twilio; email can actually be sent from a static site using a service like EmailJS (its public key is meant to be client-side). Happy to wire up either.</p>
+      <p class="admin-note">A one-time code will be sent to the SMS or email you choose above.</p>
     </div>
 
     <!-- FORGOT PASSWORD: enter OTP + new password -->
@@ -245,7 +244,7 @@
     <!-- DASHBOARD -->
     <div class="admin-view" id="view-dash">
       <h3>Events &amp; Announcements</h3>
-      <p class="sub">Changes save to this browser and update the site immediately.</p>
+      <p class="sub">Changes are saved and visible to all visitors immediately.</p>
       <div id="eventAdminList"></div>
       <hr class="sep">
       <h3 style="font-size:15px;">Add Event</h3>
